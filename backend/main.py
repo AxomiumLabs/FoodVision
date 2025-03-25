@@ -3,8 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import io
 import torch
+from utils.load_model import load_model
 from torchvision.models import efficientnet_b2, EfficientNet_B2_Weights
-from torch import nn
 
 app = FastAPI()
 
@@ -17,17 +17,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize model
-def init_model():
-    model = efficientnet_b2(weights=EfficientNet_B2_Weights.DEFAULT)
-    model.classifier = nn.Sequential(
-        nn.Dropout(p=0.3, inplace=True),
-        nn.Linear(in_features=1408, out_features=3, bias=True)
-    )
-    return model
-
 # Load the model
-model = init_model()
+model = load_model()
 automatic_transform = EfficientNet_B2_Weights.DEFAULT.transforms()
 
 
