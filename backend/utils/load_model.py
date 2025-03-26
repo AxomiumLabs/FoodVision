@@ -3,73 +3,81 @@ import torch
 from torchvision.models import efficientnet_b2, EfficientNet_B2_Weights
 from torch import nn
 import boto3
+from botocore.config import Config
 import os
 from io import BytesIO
 from dotenv import load_dotenv
-import socket
+import time
 
-# Set socket timeout
-socket.setdefaulttimeout(30)  # 30 seconds timeout
 
-# Load environment variables from .env file if it exists
+
 load_dotenv(override=True)
 
-def validate_aws_credentials():
-    """Validate that all required AWS credentials are present"""
-    required_vars = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_DEFAULT_REGION']
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        raise ValueError(f"Missing required AWS credentials: {', '.join(missing_vars)}")
 
 def load_model():
     """Load the effientnetB2 model with 92 percent accuracy from S3 or local file"""   
-    # S3 configuration with defaults
-    bucket_name = os.getenv('S3_BUCKET_NAME')
-    model_key = os.getenv('MODEL_KEY', 'models/07_effnetb2_data_20_percent_10_epochs.pt')
+    # Check if we should load from S3
+    use_s3 = os.getenv('USE_S3', 'false').lower() == 'true'
     
-    if not bucket_name:
-        raise ValueError("S3_BUCKET_NAME environment variable is required")
-    
-    try:
-        print("Validating AWS credentials...")
-
-        validate_aws_credentials()
+    if use_s3:
+        # S3 configuration
+        bucket_name = os.getenv('S3_BUCKET_NAME')
+        model_key = os.getenv('MODEL_KEY', 'models/07_effnetb2_data_20_percent_10_epochs.pt')
         
-        print("Initializing S3 client...")
-        # Initialize S3 client with explicit credentials
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-            region_name=os.getenv('AWS_DEFAULT_REGION')
+        if not bucket_name:
+            raise ValueError("S3_BUCKET_NAME environment variable is required when USE_S3 is true")
+            
+        # Initialize S3 client with timeouts
+        s3_config = Config(
+            connect_timeout=10,
+            read_timeout=30,
+            retries={'max_attempts': 2}
         )
+        s3_client = boto3.client('s3', config=s3_config)
         
-        print(f"Checking if bucket exists: {bucket_name}")
-        
-        s3_client.head_bucket(Bucket=bucket_name)
-        
-        print(f"Downloading model from S3: {model_key}")
-        response = s3_client.get_object(Bucket=bucket_name, Key=model_key)
-        model_data = response['Body'].read()
-        
-        print("Loading model weights...")
-        # Load model weights
-        weights = torch.load(BytesIO(model_data))
-        
-    except socket.timeout:
-        raise Exception("Connection to S3 timed out. Please check your internet connection.")
-    except Exception as e:
-        raise Exception(f"Failed to load model from S3: {str(e)}")
+        # Download model from S3
+        try:
+            print("Starting S3 download...")
+            start_time = time.time()
+            
+            response = s3_client.get_object(Bucket=bucket_name, Key=model_key)
+            print(f"Got S3 response in {time.time() - start_time:.2f} seconds")
+            
+            # Read data in chunks with progress
+            data = []
+            total_size = response['ContentLength']
+            bytes_read = 0
+            
+            print("Reading model data...")
+            for chunk in response['Body'].iter_chunks(chunk_size=8192):
+                data.append(chunk)
+                bytes_read += len(chunk)
+                progress = (bytes_read / total_size) * 100
+                print(f"Download progress: {progress:.1f}% ({bytes_read}/{total_size} bytes)")
+            
+            print(f"Finished reading data in {time.time() - start_time:.2f} seconds")
+            model_data = b''.join(data)
+            
+            print("Loading model weights...")
+            weights = torch.load(BytesIO(model_data))
+            print("Model loaded from S3")
+            
+        except Exception as e:
+            print(f"Failed to load model from S3: {str(e)}")
+            print("Falling back to local file...")
+            weights = torch.load("models/07_effnetb2_data_20_percent_10_epochs.pt")
+    else:
+        # Load from local file
+        print("Loading model from local file")
+        weights = torch.load("models/07_effnetb2_data_20_percent_10_epochs.pt")
     
-
+    # Create and configure model
     model = efficientnet_b2()
     model.classifier = nn.Sequential(
         nn.Dropout(p=0.3, inplace=True),
         nn.Linear(in_features=1408, out_features=3, bias=True)
     )
     model.load_state_dict(weights)
-    print("Model loaded successfully!")
     return model
     
 
